@@ -1,37 +1,42 @@
 """
 reconcile.py — Bank-to-GL three-pass reconciliation engine.
 
-
-Reads a bank statement CSV and a GL cash-account extract CSV, matches them in
-three passes of decreasing strictness, classifies whatever is left as
-exceptions with a probable cause and a suggested action, and writes a
-multi-tab, close-ready Excel workbook.
+Reads a bank statement CSV, a GL cash-account extract CSV and a balances CSV
+(stated opening/closing balances from the statement header and the trial
+balance), matches the transactions in three passes of decreasing strictness,
+classifies whatever is left as exceptions with a probable cause and a
+suggested action, and writes a multi-tab, close-ready Excel workbook.
 
     Pass 1 — EXACT      same signed amount, same date
-    Pass 2 — TIMING     same signed amount, dates within ±5 days
-                        (checks clearing late, EFT settlement lag)
+    Pass 2 — TIMING     same signed amount, cleared later:
+                          a) checks: same check number, any lag within the period
+                          b) others: dates within ±5 days, assigned optimally
+                             when several same-amount rows compete
     Pass 3 — TOLERANCE  amounts within $0.99, dates within ±7 days,
                         fuzzy description similarity (rounding / keying errors)
 
-Everything unmatched after pass 3 is an exception. Exceptions are ranked by
-dollar exposure and classified:
+All money is handled as integer cents, parsed with Decimal straight from the
+CSV text; floats appear only when values are written to the report.
 
-    bank side:  bank charge / interest / NSF not booked -> book a JE
-                unidentified debit or credit            -> investigate
-    GL side:    outstanding check                       -> carry on rec
-                deposit in transit                      -> verify July clear
-                duplicate posting                       -> reverse the entry
+The reconciliation proof starts from the STATED balances, not from sums of the
+rows, and two completeness controls check that each file's rows actually roll
+the stated opening balance to the stated closing balance. A missing or extra
+row therefore breaks the proof instead of disappearing inside it.
 
 Usage:
     python src/reconcile.py \
-        --bank data/bank_statement_jun2026.csv \
-        --gl   data/gl_cash_extract_jun2026.csv \
-        --out  output/reconciliation_report_jun2026.xlsx
+        --bank     data/bank_statement_jun2026.csv \
+        --gl       data/gl_cash_extract_jun2026.csv \
+        --balances data/balances_jun2026.csv \
+        --out      output/reconciliation_report_jun2026.xlsx
 """
 
 import argparse
+import csv
 import re
+from collections import defaultdict
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -41,20 +46,39 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 # ------------------------------------------------------------------ parameters
-TIMING_WINDOW_DAYS = 5      # pass 2: max days between GL booking and bank clearing
+TIMING_WINDOW_DAYS = 5      # pass 2b: max days between GL booking and bank clearing
 TOLERANCE_DOLLARS = 0.99    # pass 3: max absolute amount difference
 TOLERANCE_WINDOW_DAYS = 7   # pass 3: max days apart
 FUZZY_THRESHOLD = 0.35      # pass 3: min description similarity (0..1)
-OPENING_BALANCE = 184_352.19
-PERIOD_LABEL = "June 2026"
+MONTH_END_DAYS = 5          # "near month end" = within N days of the period end
 ENTITY_LABEL = "Operating Account 1010 — Cash"
+
+# Check references on either side, e.g. "CHQ#1083". Adapt to the bank / ERP format.
+CHECK_REF = re.compile(r"^\s*CHQ\s*#?\s*(\d+)\s*$", re.I)
 
 STOPWORDS = {"EFT", "PAD", "POS", "DEP", "CHQ", "ADP", "PPD", "INC", "LTD",
              "SVC", "PMT", "PAYMENT", "INVOICE", "THE", "OF", "AND", "CDA",
              "CANADA", "REF"}
 
 
-# ------------------------------------------------------------------ helpers
+# ------------------------------------------------------------------ money + text helpers
+def to_cents(text) -> int:
+    """'-1286.43' -> -128643, exactly. Never goes through a float."""
+    d = Decimal(str(text).strip().replace(",", ""))
+    return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def dollars(c: int) -> float:
+    """Display only: cents -> dollars for the Excel report."""
+    return c / 100
+
+
+def check_number(ref) -> str:
+    """'CHQ#1083' -> '1083'; anything else -> '' (not None: pandas turns None into NaN)."""
+    m = CHECK_REF.match(str(ref)) if pd.notna(ref) else None
+    return m.group(1) if m else ""
+
+
 def normalize(desc: str) -> str:
     s = re.sub(r"[^A-Z0-9 ]", " ", str(desc).upper())
     s = re.sub(r"\b(REF|CHQ)?\d+\b", " ", s)          # strip reference numbers
@@ -73,138 +97,310 @@ def similarity(a: str, b: str) -> float:
     return max(seq, jac)
 
 
+# ------------------------------------------------------------------ loading
 def load(bank_path: str, gl_path: str):
-    bank = pd.read_csv(bank_path, parse_dates=["Date"])
-    gl = pd.read_csv(gl_path, parse_dates=["Date"])
-    bank["Amount"] = bank["Amount"].astype(float)
-    gl["Amount"] = gl["Amount"].astype(float)
-    bank["_key"] = (bank["Amount"] * 100).round().astype(int)  # cents key, no float fuzz
-    gl["_key"] = (gl["Amount"] * 100).round().astype(int)
+    bank = pd.read_csv(bank_path, dtype={"Amount": str, "Reference": str}, parse_dates=["Date"], encoding="utf-8-sig")
+    gl = pd.read_csv(gl_path, dtype={"Amount": str, "DocNo": str}, parse_dates=["Date"], encoding="utf-8-sig")
+    for df, ref_col in ((bank, "Reference"), (gl, "DocNo")):
+        df["cents"] = df["Amount"].map(to_cents)
+        df["Amount"] = df["cents"].map(dollars)            # display copy
+        df["chk"] = df[ref_col].map(check_number)
+        df["src_row"] = df.index + 2                       # row in the source CSV (after header)
     return bank.reset_index(drop=True), gl.reset_index(drop=True)
 
 
+def load_balances(path: str) -> dict:
+    """Stated balances — the independent figures the proof is built on."""
+    out = {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            out[r["Source"].strip().upper()] = {
+                "start": date.fromisoformat(r["PeriodStart"]),
+                "end": date.fromisoformat(r["PeriodEnd"]),
+                "open": to_cents(r["OpeningBalance"]),
+                "close": to_cents(r["ClosingBalance"]),
+            }
+    missing = {"BANK", "GL"} - out.keys()
+    if missing:
+        raise ValueError(f"balances file missing: {sorted(missing)}")
+    if out["BANK"]["end"] != out["GL"]["end"]:
+        raise ValueError("bank and GL balances are for different period ends")
+    out["period_end"] = pd.Timestamp(out["BANK"]["end"])
+    return out
+
+
 # ------------------------------------------------------------------ matching
+def optimal_date_pairs(bank, gl, bank_ids, gl_ids, window, compatible):
+    """
+    Pair same-amount rows by date, one-to-one, maximising the number of pairs
+    and then minimising the total day gap.
+
+    Greedy nearest-date fails when rows compete: a Jun 10 debit grabs the
+    Jun 11 booking (gap 1) and strands a Jun 15 debit 7 days from the Jun 8
+    booking. The optimum pairs Jun 8→10 and Jun 11→15. On a line, an optimal
+    matching never needs crossing pairs, so a DP over both lists sorted by
+    date finds it exactly. Groups are tiny (same exact amount), so this is cheap.
+    """
+    bs = sorted(bank_ids, key=lambda i: (bank.at[i, "Date"], i))
+    gs = sorted(gl_ids, key=lambda i: (gl.at[i, "Date"], i))
+    n, m = len(bs), len(gs)
+    best = [[(0, 0)] * (m + 1) for _ in range(n + 1)]   # (pairs, -total_gap)
+    move = [[None] * (m + 1) for _ in range(n + 1)]
+    for i in range(n - 1, -1, -1):
+        for j in range(m - 1, -1, -1):
+            options = []
+            gap = abs((bank.at[bs[i], "Date"] - gl.at[gs[j], "Date"]).days)
+            if gap <= window and compatible(bs[i], gs[j]):
+                k, neg = best[i + 1][j + 1]
+                options.append(((k + 1, neg - gap), "pair"))
+            options.append((best[i + 1][j], "skip_bank"))
+            options.append((best[i][j + 1], "skip_gl"))
+            best[i][j], move[i][j] = max(options, key=lambda o: o[0])
+    pairs, i, j = [], 0, 0
+    while i < n and j < m:
+        if move[i][j] == "pair":
+            pairs.append((bs[i], gs[j]))
+            i, j = i + 1, j + 1
+        elif move[i][j] == "skip_bank":
+            i += 1
+        else:
+            j += 1
+    return pairs
+
+
 def run_matching(bank: pd.DataFrame, gl: pd.DataFrame):
-    """Greedy one-to-one matching in three passes. Returns (matches, bank_open, gl_open)."""
-    matches = []          # dicts with bank idx, gl idx, pass name, deltas, score
+    """One-to-one matching in three passes. Returns (matches, bank_open, gl_open)."""
+    matches = []
     bank_open = set(bank.index)
     gl_open = set(gl.index)
 
-    def pair(bi, gi, pass_name, score=None):
+    def compatible(bi, gi):
+        """Two rows that both carry a check number must carry the same one."""
+        bc, gc = bank.at[bi, "chk"], gl.at[gi, "chk"]
+        return not bc or not gc or bc == gc
+
+    def pair(bi, gi, pass_name, method, score=None):
         b, g = bank.loc[bi], gl.loc[gi]
         matches.append({
-            "pass": pass_name,
+            "pass": pass_name, "method": method,
             "bank_idx": bi, "gl_idx": gi,
             "date_delta": int((b["Date"] - g["Date"]).days),
-            "amount_delta": round(b["Amount"] - g["Amount"], 2),
+            "cents_delta": int(b["cents"] - g["cents"]),
             "score": score,
         })
         bank_open.discard(bi)
         gl_open.discard(gi)
 
     # Pass 1 — exact: same cents, same date
-    gl_by_key = {}
-    for gi in gl_open:
-        gl_by_key.setdefault(gl.at[gi, "_key"], []).append(gi)
+    gl_exact = defaultdict(list)
+    for gi in sorted(gl_open):
+        gl_exact[(gl.at[gi, "cents"], gl.at[gi, "Date"])].append(gi)
     for bi in sorted(bank_open):
-        key = bank.at[bi, "_key"]
-        for gi in gl_by_key.get(key, []):
-            if gi in gl_open and gl.at[gi, "Date"] == bank.at[bi, "Date"]:
-                pair(bi, gi, "Exact")
+        for gi in gl_exact.get((bank.at[bi, "cents"], bank.at[bi, "Date"]), []):
+            if gi in gl_open and compatible(bi, gi):
+                pair(bi, gi, "Exact", "amount + date")
                 break
 
-    # Pass 2 — timing: same cents, nearest date within the window
+    # Pass 2a — checks: same check number and same cents, whatever the clearing lag
+    gl_checks = defaultdict(list)
+    for gi in sorted(gl_open):
+        if gl.at[gi, "chk"]:
+            gl_checks[(gl.at[gi, "chk"], gl.at[gi, "cents"])].append(gi)
     for bi in sorted(bank_open):
-        key = bank.at[bi, "_key"]
-        best, best_dd = None, None
-        for gi in gl_by_key.get(key, []):
-            if gi not in gl_open:
-                continue
-            dd = abs((bank.at[bi, "Date"] - gl.at[gi, "Date"]).days)
-            if dd <= TIMING_WINDOW_DAYS and (best is None or dd < best_dd):
-                best, best_dd = gi, dd
-        if best is not None:
-            pair(bi, best, "Timing")
+        if bank.at[bi, "chk"]:
+            for gi in gl_checks.get((bank.at[bi, "chk"], bank.at[bi, "cents"]), []):
+                if gi in gl_open:
+                    pair(bi, gi, "Timing", "check no.")
+                    break
 
-    # Pass 3 — tolerance + fuzzy description: best similarity wins
-    tol_cents = int(TOLERANCE_DOLLARS * 100)
+    # Pass 2b — same cents within the window, optimal assignment per amount
+    by_amount = defaultdict(lambda: ([], []))
+    for bi in sorted(bank_open):
+        by_amount[bank.at[bi, "cents"]][0].append(bi)
+    for gi in sorted(gl_open):
+        if gl.at[gi, "cents"] in by_amount:
+            by_amount[gl.at[gi, "cents"]][1].append(gi)
+    for cents_key in sorted(by_amount):
+        bank_ids, gl_ids = by_amount[cents_key]
+        if bank_ids and gl_ids:
+            for bi, gi in optimal_date_pairs(bank, gl, bank_ids, gl_ids,
+                                             TIMING_WINDOW_DAYS, compatible):
+                pair(bi, gi, "Timing", "date window")
+
+    # Pass 3 — tolerance + fuzzy description: best candidates first, globally
+    tol_cents = round(TOLERANCE_DOLLARS * 100)
+    candidates = []
     for bi in sorted(bank_open):
         b = bank.loc[bi]
-        best, best_score = None, 0.0
         for gi in sorted(gl_open):
             g = gl.loc[gi]
-            if abs(b["_key"] - g["_key"]) > tol_cents or b["_key"] == g["_key"]:
-                continue  # same-cents pairs belong to passes 1-2
-            if abs((b["Date"] - g["Date"]).days) > TOLERANCE_WINDOW_DAYS:
+            if (b["cents"] > 0) != (g["cents"] > 0):
+                continue  # never pair money in with money out
+            if abs(b["cents"] - g["cents"]) > tol_cents:
+                continue
+            days = abs((b["Date"] - g["Date"]).days)
+            if days > TOLERANCE_WINDOW_DAYS or not compatible(bi, gi):
                 continue
             score = similarity(b["Description"], g["Memo"])
-            if score >= FUZZY_THRESHOLD and score > best_score:
-                best, best_score = gi, score
-        if best is not None:
-            pair(bi, best, "Tolerance", round(best_score, 2))
+            if score >= FUZZY_THRESHOLD:
+                candidates.append((-score, days, abs(b["cents"] - g["cents"]), bi, gi, score))
+    for _, _, _, bi, gi, score in sorted(candidates):
+        if bi in bank_open and gi in gl_open:
+            pair(bi, gi, "Tolerance", "fuzzy", round(score, 2))
 
     return matches, bank_open, gl_open
 
 
 # ------------------------------------------------------------------ exceptions
-FEE_PATTERN = re.compile(r"\bFEE\b|SERVICE CHARGE|SVC CHG|\bNSF\b|OVERDRAFT", re.I)
+# Machine-readable category codes drive the proof and the report styling;
+# the text is for people. Each code: (probable cause, suggested action).
+CATEGORIES = {
+    # bank only — need a journal entry
+    "BANK_CHARGE": ("Bank charge — not booked in GL",
+                    "Book JE: DR 6220 Bank Charges / CR 1010 Cash"),
+    "INTEREST_INC": ("Interest earned — not booked in GL",
+                     "Book JE: DR 1010 Cash / CR 4210 Interest Income"),
+    "INTEREST_EXP": ("Interest charged — not booked in GL",
+                     "Book JE: DR 7110 Interest Expense / CR 1010 Cash"),
+    "NSF_RETURN": ("Customer deposit returned NSF — not booked in GL",
+                   "Book JE: DR 1200 Accounts Receivable / CR 1010 Cash — contact customer"),
+    # bank only — need investigation
+    "UNID_CREDIT": ("Unidentified bank credit",
+                    "Trace with bank / AR — identify payer before booking"),
+    "UNID_DEBIT": ("Unidentified bank debit",
+                   "Investigate with bank — possible unauthorized PAD"),
+    # GL only — timing, carried on the rec
+    "OS_CHECK": ("Outstanding check",
+                 "Carry as reconciling item — follow up if stale > 60 days"),
+    "PMT_IN_TRANSIT": ("Payment initiated near month end, not yet cleared",
+                       "Confirm settlement on next bank statement"),
+    "DIT": ("Deposit in transit",
+            "Verify credit on next bank statement"),
+    # GL only — need investigation
+    "PMT_NOT_DEBITED": ("Payment booked mid-period, never debited by bank",
+                        "Investigate — confirm the payment was actually sent"),
+    "DEP_NOT_CREDITED": ("Deposit booked mid-period, never credited by bank",
+                         "Investigate — confirm funds were actually deposited"),
+    "DUPLICATE": ("Possible duplicate posting (same document and amount as another entry)",
+                  "Review source document — reverse the duplicate JE"),
+}
+
 INTEREST_PATTERN = re.compile(r"\bINTEREST\b", re.I)
+FEE_PATTERN = re.compile(r"\bFEE\b|SERVICE CHARGE|SVC CHG|OVERDRAFT", re.I)
+NSF_PATTERN = re.compile(r"\bNSF\b|RETURNED (ITEM|CHQ|CHEQUE|CHECK)", re.I)
 
-MONTH_END_DAYS = 5  # "near month end" = within the last N days of the period
+
+def classify_bank_only(b) -> str:
+    desc = str(b["Description"])
+    if INTEREST_PATTERN.search(desc):
+        return "INTEREST_INC" if b["cents"] > 0 else "INTEREST_EXP"
+    if FEE_PATTERN.search(desc):          # checked before NSF: "NSF RETURNED ITEM FEE" is a fee
+        return "BANK_CHARGE"
+    if NSF_PATTERN.search(desc) and b["cents"] < 0:
+        return "NSF_RETURN"
+    return "UNID_CREDIT" if b["cents"] > 0 else "UNID_DEBIT"
 
 
-def classify_exceptions(bank, gl, bank_open, gl_open, matches):
-    period_end = max(bank["Date"].max(), gl["Date"].max())
-    matched_gl = {(gl.at[m["gl_idx"], "_key"], normalize(gl.at[m["gl_idx"], "Memo"]))
-                  for m in matches}
+def classify_exceptions(bank, gl, bank_open, gl_open, matches, period_end):
+    def doc_key(gi):
+        doc = gl.at[gi, "DocNo"]
+        doc = "" if pd.isna(doc) else str(doc).strip().upper()
+        return (int(gl.at[gi, "cents"]), doc) if doc else None
+
+    # A duplicate repeats the SAME document for the same amount. Recurring
+    # payments (same vendor, same amount) carry different documents.
+    seen_docs = {doc_key(m["gl_idx"]) for m in matches} - {None}
     rows = []
 
     for bi in sorted(bank_open):
         b = bank.loc[bi]
-        if INTEREST_PATTERN.search(b["Description"]):
-            cause = "Interest earned — not booked in GL"
-            action = "Book JE: DR 1010 Cash / CR 4210 Interest Income"
-        elif FEE_PATTERN.search(b["Description"]):
-            cause = "Bank charge — not booked in GL"
-            action = "Book JE: DR 6220 Bank Charges / CR 1010 Cash"
-        elif b["Amount"] > 0:
-            cause = "Unidentified bank credit"
-            action = "Trace with bank / AR — identify payer before booking"
-        else:
-            cause = "Unidentified bank debit"
-            action = "Investigate with bank — possible unauthorized PAD"
-        rows.append({
-            "Side": "Bank only", "Date": b["Date"], "Description": b["Description"],
-            "Doc/Ref": b["Reference"], "Amount": b["Amount"],
-            "Probable cause": cause, "Suggested action": action,
-        })
+        rows.append({"Side": "Bank only", "Date": b["Date"], "Description": b["Description"],
+                     "Doc/Ref": b["Reference"], "cents": int(b["cents"]),
+                     "Category": classify_bank_only(b), "Source row": int(b["src_row"])})
 
-    for gi in sorted(gl_open):
+    for gi in sorted(gl_open, key=lambda i: (gl.at[i, "Date"], i)):
         g = gl.loc[gi]
+        key = doc_key(gi)
         near_eom = (period_end - g["Date"]).days <= MONTH_END_DAYS
-        is_dup = (g["_key"], normalize(g["Memo"])) in matched_gl
-        if is_dup:
-            cause = "Possible duplicate posting (identical to a matched entry)"
-            action = "Review source document — reverse the duplicate JE"
-        elif g["Amount"] < 0 and str(g["DocNo"]).startswith("CHQ"):
-            cause = "Outstanding check" + (" (issued near month end)" if near_eom else "")
-            action = "Carry as reconciling item — follow up if stale > 60 days"
-        elif g["Amount"] < 0:
-            cause = "Payment initiated, not yet cleared"
-            action = "Confirm settlement in July statement"
+        if key is not None and key in seen_docs:
+            cat = "DUPLICATE"
+        elif g["cents"] < 0 and g["chk"]:
+            cat = "OS_CHECK"
+        elif g["cents"] < 0:
+            cat = "PMT_IN_TRANSIT" if near_eom else "PMT_NOT_DEBITED"
         else:
-            cause = "Deposit in transit"
-            action = "Verify credit on July bank statement"
-        rows.append({
-            "Side": "GL only", "Date": g["Date"], "Description": g["Memo"],
-            "Doc/Ref": g["DocNo"], "Amount": g["Amount"],
-            "Probable cause": cause, "Suggested action": action,
-        })
+            cat = "DIT" if near_eom else "DEP_NOT_CREDITED"
+        if key is not None:
+            seen_docs.add(key)
+        rows.append({"Side": "GL only", "Date": g["Date"], "Description": g["Memo"],
+                     "Doc/Ref": g["DocNo"], "cents": int(g["cents"]),
+                     "Category": cat, "Source row": int(g["src_row"])})
 
-    rows.sort(key=lambda r: abs(r["Amount"]), reverse=True)
+    for r in rows:
+        r["Amount"] = dollars(r["cents"])
+        cause, action = CATEGORIES[r["Category"]]
+        if r["Category"] == "OS_CHECK" and (period_end - r["Date"]).days <= MONTH_END_DAYS:
+            cause += " (issued near month end)"
+        r["Probable cause"], r["Suggested action"] = cause, action
+
+    rows.sort(key=lambda r: (-abs(r["cents"]), r["Date"], r["Side"], r["Source row"]))
     for rank, r in enumerate(rows, 1):
         r["Rank"] = rank
     return rows
+
+
+# ------------------------------------------------------------------ proof
+# Where each category sits on the rec. Every category must appear exactly once;
+# build_proof refuses to run otherwise, so a new category can't silently vanish.
+BANK_SIDE = [
+    ("add: deposits in transit", ["DIT"]),
+    ("add: deposits not credited by bank (investigate)", ["DEP_NOT_CREDITED"]),
+    ("less: outstanding checks", ["OS_CHECK"]),
+    ("less: payments in transit", ["PMT_IN_TRANSIT"]),
+    ("less: payments not debited by bank (investigate)", ["PMT_NOT_DEBITED"]),
+]
+GL_SIDE = [
+    ("add: bank charges not booked", ["BANK_CHARGE"]),
+    ("add: interest not booked (net)", ["INTEREST_INC", "INTEREST_EXP"]),
+    ("add: NSF returned deposits not booked", ["NSF_RETURN"]),
+    ("add: unidentified bank items (pending ID)", ["UNID_CREDIT", "UNID_DEBIT"]),
+]
+REVERSED_ON_GL = [("add back: duplicate postings to reverse", ["DUPLICATE"])]
+
+
+def build_proof(bank, gl, matches, exceptions, balances) -> dict:
+    placed = [c for _, cats in BANK_SIDE + GL_SIDE + REVERSED_ON_GL for c in cats]
+    if sorted(placed) != sorted(CATEGORIES):
+        raise RuntimeError("every exception category must sit on exactly one proof line")
+
+    by_cat = defaultdict(int)
+    for e in exceptions:
+        by_cat[e["Category"]] += e["cents"]
+
+    def line_total(cats):
+        return sum(by_cat[c] for c in cats)
+
+    B, G = balances["BANK"], balances["GL"]
+    completeness = {}
+    for side, df, bal in (("Bank", bank, B), ("GL", gl, G)):
+        movement = int(df["cents"].sum())
+        completeness[side] = {"open": bal["open"], "movement": movement,
+                              "computed_close": bal["open"] + movement,
+                              "stated_close": bal["close"],
+                              "diff": bal["close"] - (bal["open"] + movement)}
+
+    residual = sum(m["cents_delta"] for m in matches)   # nonzero only for pass 3
+    bank_lines = [(label, line_total(cats)) for label, cats in BANK_SIDE]
+    gl_lines = [(label, line_total(cats)) for label, cats in GL_SIDE]
+    gl_lines += [(label, -line_total(cats)) for label, cats in REVERSED_ON_GL]
+    gl_lines.append(("add: pass-3 amount residuals (pending write-off JE)", residual))
+
+    adj_bank = B["close"] + sum(v for _, v in bank_lines)
+    adj_gl = G["close"] + sum(v for _, v in gl_lines)
+    return {"completeness": completeness,
+            "bank_close": B["close"], "bank_lines": bank_lines, "adj_bank": adj_bank,
+            "gl_close": G["close"], "gl_lines": gl_lines, "adj_gl": adj_gl,
+            "difference": adj_bank - adj_gl}
 
 
 # ------------------------------------------------------------------ excel report
@@ -215,25 +411,29 @@ HEADER_FONT = Font(color="FFFFFF", bold=True, size=10)
 TITLE_FONT = Font(bold=True, size=14, color="1F3864")
 SUB_FONT = Font(size=10, color="595959")
 MONEY = '#,##0.00;[Red](#,##0.00)'
+COUNT = "0"
+PCT = "0.0%"
 
-CAUSE_FILLS = {
-    "duplicate": PatternFill("solid", fgColor="F8CBAD"),
-    "Unidentified": PatternFill("solid", fgColor="FFC7CE"),
-    "Outstanding": PatternFill("solid", fgColor="FFF2CC"),
-    "Deposit in transit": PatternFill("solid", fgColor="DDEBF7"),
-    "Bank charge": PatternFill("solid", fgColor="E2EFDA"),
-    "Interest": PatternFill("solid", fgColor="E2EFDA"),
-}
+_JE, _INVESTIGATE = "E2EFDA", "FFC7CE"
+CATEGORY_FILLS = {code: PatternFill("solid", fgColor=color) for code, color in {
+    "DUPLICATE": "F8CBAD",
+    "UNID_CREDIT": _INVESTIGATE, "UNID_DEBIT": _INVESTIGATE,
+    "PMT_NOT_DEBITED": _INVESTIGATE, "DEP_NOT_CREDITED": _INVESTIGATE,
+    "OS_CHECK": "FFF2CC", "PMT_IN_TRANSIT": "FFF2CC",
+    "DIT": "DDEBF7",
+    "BANK_CHARGE": _JE, "INTEREST_INC": _JE, "INTEREST_EXP": _JE, "NSF_RETURN": _JE,
+}.items()}
 
 
-def style_header(ws, row, ncols):
+def style_header(ws, row, ncols, freeze=True):
     for c in range(1, ncols + 1):
         cell = ws.cell(row=row, column=c)
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
         cell.border = BORDER
         cell.alignment = Alignment(vertical="center")
-    ws.freeze_panes = ws.cell(row=row + 1, column=1)
+    if freeze:
+        ws.freeze_panes = ws.cell(row=row + 1, column=1)
 
 
 def autosize(ws, widths):
@@ -241,11 +441,10 @@ def autosize(ws, widths):
         ws.column_dimensions[get_column_letter(i)].width = w
 
 
-def write_table(ws, start_row, headers, rows, money_cols, date_cols):
-    ws.append([])  # ensure openpyxl row cursor sane when using explicit cells
+def write_table(ws, start_row, headers, rows, money_cols=(), date_cols=(), freeze=True):
     for c, h in enumerate(headers, 1):
         ws.cell(row=start_row, column=c, value=h)
-    style_header(ws, start_row, len(headers))
+    style_header(ws, start_row, len(headers), freeze)
     r = start_row
     for rowdata in rows:
         r += 1
@@ -259,35 +458,25 @@ def write_table(ws, start_row, headers, rows, money_cols, date_cols):
     return r
 
 
-def build_report(bank, gl, matches, exceptions, out_path):
+def write_label_value_table(ws, start_row, header, rows, bold_prefixes=()):
+    """rows: (label, value, number_format). Formats are per row, not per column."""
+    r = write_table(ws, start_row, list(header), [(lbl, val) for lbl, val, _ in rows], freeze=False)
+    for i, (label, _, fmt) in enumerate(rows, start_row + 1):
+        ws.cell(row=i, column=2).number_format = fmt
+        if str(label).startswith(bold_prefixes):
+            ws.cell(row=i, column=1).font = Font(bold=True)
+            ws.cell(row=i, column=2).font = Font(bold=True)
+    return r
+
+
+def build_report(bank, gl, matches, exceptions, proof, period_end, out_path):
     wb = Workbook()
+    period_label = period_end.strftime("%B %Y")
 
-    m_by_pass = {"Exact": [], "Timing": [], "Tolerance": []}
+    by_pass = defaultdict(list)
     for m in matches:
-        m_by_pass[m["pass"]].append(m)
-
-    bank_total = bank["Amount"].sum()
-    gl_total = gl["Amount"].sum()
-    bank_end = OPENING_BALANCE + bank_total
-    gl_end = OPENING_BALANCE + gl_total
-
-    exc = {"dit": 0.0, "oschk": 0.0, "unbooked": 0.0, "dup": 0.0, "unid": 0.0}
-    for e in exceptions:
-        cause = e["Probable cause"]
-        if "Deposit in transit" in cause:
-            exc["dit"] += e["Amount"]
-        elif "Outstanding check" in cause or "not yet cleared" in cause:
-            exc["oschk"] += e["Amount"]
-        elif "duplicate" in cause:
-            exc["dup"] += e["Amount"]
-        elif "Unidentified" in cause:
-            exc["unid"] += e["Amount"]
-        else:
-            exc["unbooked"] += e["Amount"]
-
-    residual = round(sum(m["amount_delta"] for m in matches if m["pass"] == "Tolerance"), 2)
-    adj_bank = bank_end + exc["dit"] + exc["oschk"]          # bank +DIT -O/S checks
-    adj_gl = gl_end + exc["unbooked"] - exc["dup"] + exc["unid"] + residual
+        by_pass[m["pass"]].append(m)
+    n_check = sum(1 for m in by_pass["Timing"] if m["method"] == "check no.")
 
     # ---------------- Summary tab
     ws = wb.active
@@ -295,70 +484,73 @@ def build_report(bank, gl, matches, exceptions, out_path):
     ws.sheet_properties.tabColor = "1F3864"
     ws["A1"] = "Bank-to-GL Reconciliation"
     ws["A1"].font = TITLE_FONT
-    ws["A2"] = f"{ENTITY_LABEL}  ·  Period: {PERIOD_LABEL}"
+    ws["A2"] = f"{ENTITY_LABEL}  ·  Period: {period_label}"
     ws["A2"].font = SUB_FONT
     ws["A3"] = "Engine: three-pass matcher (exact / timing / tolerance+fuzzy)"
     ws["A3"].font = SUB_FONT
 
     stats = [
-        ("Bank transactions", len(bank)),
-        ("GL transactions", len(gl)),
-        ("Matched — Pass 1 (exact)", len(m_by_pass["Exact"])),
-        ("Matched — Pass 2 (timing ±5 days)", len(m_by_pass["Timing"])),
-        ("Matched — Pass 3 (tolerance ≤ $0.99 + fuzzy)", len(m_by_pass["Tolerance"])),
-        ("Total reconciled", len(matches)),
-        ("Match rate (bank side)", f"{len(matches) / len(bank):.1%}"),
-        ("Exceptions isolated", len(exceptions)),
-        ("Exception exposure (gross $)", round(sum(abs(e["Amount"]) for e in exceptions), 2)),
+        ("Bank transactions", len(bank), COUNT),
+        ("GL transactions", len(gl), COUNT),
+        ("Matched — Pass 1 (exact)", len(by_pass["Exact"]), COUNT),
+        ("Matched — Pass 2 (timing)", len(by_pass["Timing"]), COUNT),
+        ("   of which by check number", n_check, COUNT),
+        (f"   of which by date window ±{TIMING_WINDOW_DAYS} days", len(by_pass["Timing"]) - n_check, COUNT),
+        ("Matched — Pass 3 (tolerance ≤ $0.99 + fuzzy)", len(by_pass["Tolerance"]), COUNT),
+        ("Total reconciled", len(matches), COUNT),
+        ("Match rate (bank side)", len(matches) / len(bank) if len(bank) else 0, PCT),
+        ("Exceptions isolated", len(exceptions), COUNT),
+        ("Exception exposure (gross $)", dollars(sum(abs(e["cents"]) for e in exceptions)), MONEY),
     ]
-    r = write_table(ws, 5, ["Metric", "Value"], stats, money_cols={2}, date_cols=set())
-    ws.cell(row=11, column=2).number_format = "0"      # total reconciled as int
-    for rr in (6, 7, 8, 9, 10, 12):
-        ws.cell(row=rr, column=2).number_format = "0"
+    r = write_label_value_table(ws, 5, ("Metric", "Value"), stats,
+                                bold_prefixes=("Total reconciled",))
 
-    proof = [
-        ("Ending balance per bank statement", round(bank_end, 2)),
-        ("  add: deposits in transit", round(exc["dit"], 2)),
-        ("  less: outstanding checks / uncleared payments", round(exc["oschk"], 2)),
-        ("Adjusted bank balance", round(adj_bank, 2)),
-        ("Ending balance per general ledger", round(gl_end, 2)),
-        ("  add: bank charges / interest not booked (net)", round(exc["unbooked"], 2)),
-        ("  add back: duplicate posting to reverse", round(-exc["dup"], 2)),
-        ("  add: unidentified bank items (net, pending ID)", round(exc["unid"], 2)),
-        ("  add: pass-3 amount residuals (pending write-off JE)", residual),
-        ("Adjusted GL balance", round(adj_gl, 2)),
-        ("Unreconciled difference", round(adj_bank - adj_gl, 2)),
-    ]
-    last_proof = write_table(ws, r + 2, ["Reconciliation proof", "Amount"], proof,
-                             money_cols={2}, date_cols=set())
-    for rr in range(r + 3, last_proof + 1):
-        label = str(ws.cell(row=rr, column=1).value)
-        if label.startswith(("Adjusted", "Unreconciled", "Ending")):
-            ws.cell(row=rr, column=1).font = Font(bold=True)
-            ws.cell(row=rr, column=2).font = Font(bold=True)
-    autosize(ws, [52, 20])
+    controls = []
+    for side, c in proof["completeness"].items():
+        label = "bank statement" if side == "Bank" else "general ledger"
+        controls += [
+            (f"{side}: opening balance per {label}", dollars(c["open"]), MONEY),
+            (f"{side}: + net movement of rows in file", dollars(c["movement"]), MONEY),
+            (f"{side}: = computed closing balance", dollars(c["computed_close"]), MONEY),
+            (f"{side}: closing balance per {label}", dollars(c["stated_close"]), MONEY),
+            (f"{side}: difference (missing / extra rows)", dollars(c["diff"]), MONEY),
+        ]
+    r = write_label_value_table(ws, r + 2, ("Input completeness controls", "Amount"), controls,
+                                bold_prefixes=("Bank: difference", "GL: difference"))
+
+    proof_rows = [("Ending balance per bank statement", dollars(proof["bank_close"]), MONEY)]
+    proof_rows += [(f"  {lbl}", dollars(v), MONEY) for lbl, v in proof["bank_lines"]]
+    proof_rows += [("Adjusted bank balance", dollars(proof["adj_bank"]), MONEY),
+                   ("Ending balance per general ledger", dollars(proof["gl_close"]), MONEY)]
+    proof_rows += [(f"  {lbl}", dollars(v), MONEY) for lbl, v in proof["gl_lines"]]
+    proof_rows += [("Adjusted GL balance", dollars(proof["adj_gl"]), MONEY),
+                   ("Unreconciled difference", dollars(proof["difference"]), MONEY)]
+    last = write_label_value_table(ws, r + 2, ("Reconciliation proof", "Amount"), proof_rows,
+                                   bold_prefixes=("Adjusted", "Unreconciled", "Ending"))
+    status = "TIES" if proof["difference"] == 0 else "DOES NOT TIE — investigate before close"
+    ws.cell(row=last + 1, column=1, value=f"Status: {status}").font = Font(
+        bold=True, color="375623" if proof["difference"] == 0 else "C00000")
+    autosize(ws, [56, 20])
 
     # ---------------- Exceptions tab
     ws = wb.create_sheet("Exceptions")
     ws.sheet_properties.tabColor = "C00000"
     ws["A1"] = "Exception Report — ranked by dollar exposure"
     ws["A1"].font = TITLE_FONT
-    ws["A2"] = "Each break carries a probable cause and the action that clears it."
+    ws["A2"] = "Each break carries a category, a probable cause and the action that clears it."
     ws["A2"].font = SUB_FONT
     headers = ["Rank", "Side", "Date", "Description", "Doc/Ref", "Amount",
-               "Probable cause", "Suggested action"]
-    rows = [[e["Rank"], e["Side"], e["Date"], e["Description"], e["Doc/Ref"],
-             e["Amount"], e["Probable cause"], e["Suggested action"]]
+               "Category", "Probable cause", "Suggested action", "Source row"]
+    rows = [[e["Rank"], e["Side"], e["Date"], e["Description"], e["Doc/Ref"], e["Amount"],
+             e["Category"], e["Probable cause"], e["Suggested action"], e["Source row"]]
             for e in exceptions]
-    last = write_table(ws, 4, headers, rows, money_cols={6}, date_cols={3})
-    for rr in range(5, last + 1):
-        cause = str(ws.cell(row=rr, column=7).value)
-        for key, fill in CAUSE_FILLS.items():
-            if key.lower() in cause.lower():
-                for cc in range(1, 9):
-                    ws.cell(row=rr, column=cc).fill = fill
-                break
-    autosize(ws, [6, 10, 12, 44, 12, 14, 46, 46])
+    write_table(ws, 4, headers, rows, money_cols={6}, date_cols={3})
+    for i, e in enumerate(exceptions, 5):
+        fill = CATEGORY_FILLS.get(e["Category"])
+        if fill:
+            for c in range(1, len(headers) + 1):
+                ws.cell(row=i, column=c).fill = fill
+    autosize(ws, [6, 10, 12, 42, 13, 14, 18, 50, 52, 10])
 
     # ---------------- Matched tabs
     def matched_tab(name, color, mlist, note):
@@ -368,22 +560,23 @@ def build_report(bank, gl, matches, exceptions, out_path):
         ws["A1"].font = SUB_FONT
         headers = ["Bank date", "Bank description", "Bank amount",
                    "GL date", "GL memo", "GL doc", "GL amount",
-                   "Days Δ", "Amount Δ", "Match score"]
+                   "Method", "Days Δ", "Amount Δ", "Match score"]
         rows = []
-        for m in sorted(mlist, key=lambda x: bank.at[x["bank_idx"], "Date"]):
+        for m in sorted(mlist, key=lambda x: (bank.at[x["bank_idx"], "Date"], x["bank_idx"])):
             b, g = bank.loc[m["bank_idx"]], gl.loc[m["gl_idx"]]
             rows.append([b["Date"], b["Description"], b["Amount"],
                          g["Date"], g["Memo"], g["DocNo"], g["Amount"],
-                         m["date_delta"], m["amount_delta"],
+                         m["method"], m["date_delta"], dollars(m["cents_delta"]),
                          m["score"] if m["score"] is not None else "—"])
-        write_table(ws, 3, headers, rows, money_cols={3, 7, 9}, date_cols={1, 4})
-        autosize(ws, [12, 38, 14, 12, 38, 12, 14, 8, 11, 12])
+        write_table(ws, 3, headers, rows, money_cols={3, 7, 10}, date_cols={1, 4})
+        autosize(ws, [12, 38, 14, 12, 42, 12, 14, 13, 8, 11, 12])
 
-    matched_tab("Matched — Exact", "375623", m_by_pass["Exact"],
+    matched_tab("Matched — Exact", "375623", by_pass["Exact"],
                 "Pass 1: identical signed amount and identical date.")
-    matched_tab("Matched — Timing", "548235", m_by_pass["Timing"],
-                f"Pass 2: identical amount, cleared within ±{TIMING_WINDOW_DAYS} days (checks/EFT settlement lag).")
-    matched_tab("Matched — Tolerance", "70AD47", m_by_pass["Tolerance"],
+    matched_tab("Matched — Timing", "548235", by_pass["Timing"],
+                f"Pass 2: identical amount, cleared later — checks by check number; "
+                f"others within ±{TIMING_WINDOW_DAYS} days, assigned to minimise total lag.")
+    matched_tab("Matched — Tolerance", "70AD47", by_pass["Tolerance"],
                 f"Pass 3: amount within ${TOLERANCE_DOLLARS}, ±{TOLERANCE_WINDOW_DAYS} days, "
                 f"description similarity ≥ {FUZZY_THRESHOLD}. Amount Δ = residual to write off or adjust.")
 
@@ -391,45 +584,59 @@ def build_report(bank, gl, matches, exceptions, out_path):
     def source_tab(name, df, cols, money_col):
         ws = wb.create_sheet(name)
         ws.sheet_properties.tabColor = "808080"
-        rows = df[cols].values.tolist()
-        write_table(ws, 1, cols, rows, money_cols={money_col}, date_cols={1})
+        write_table(ws, 1, cols, df[cols].values.tolist(), money_cols={money_col}, date_cols={1})
         autosize(ws, [12] + [34] * (len(cols) - 2) + [14])
 
-    source_tab("Bank Statement (source)", bank.sort_values("Date"),
+    source_tab("Bank Statement (source)", bank.sort_values(["Date", "src_row"]),
                ["Date", "Description", "Reference", "Amount"], 4)
-    source_tab("GL Extract (source)", gl.sort_values("Date"),
+    source_tab("GL Extract (source)", gl.sort_values(["Date", "src_row"]),
                ["Date", "Account", "Memo", "DocNo", "Amount"], 5)
 
     out_path = Path(out_path)
-    out_path.parent.mkdir(exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out_path)
     return out_path
 
 
 # ------------------------------------------------------------------ main
+def reconcile(bank_path, gl_path, balances_path):
+    """Everything except the report — the entry point tests will call."""
+    bank, gl = load(bank_path, gl_path)
+    balances = load_balances(balances_path)
+    matches, bank_open, gl_open = run_matching(bank, gl)
+    exceptions = classify_exceptions(bank, gl, bank_open, gl_open, matches, balances["period_end"])
+    proof = build_proof(bank, gl, matches, exceptions, balances)
+    return bank, gl, balances, matches, exceptions, proof
+
+
 def main():
     ap = argparse.ArgumentParser(description="Three-pass bank-to-GL reconciliation")
     root = Path(__file__).resolve().parent.parent
     ap.add_argument("--bank", default=str(root / "data/bank_statement_jun2026.csv"))
     ap.add_argument("--gl", default=str(root / "data/gl_cash_extract_jun2026.csv"))
+    ap.add_argument("--balances", default=str(root / "data/balances_jun2026.csv"))
     ap.add_argument("--out", default=str(root / "output/reconciliation_report_jun2026.xlsx"))
     args = ap.parse_args()
 
-    bank, gl = load(args.bank, args.gl)
-    matches, bank_open, gl_open = run_matching(bank, gl)
-    exceptions = classify_exceptions(bank, gl, bank_open, gl_open, matches)
-    out = build_report(bank, gl, matches, exceptions, args.out)
+    bank, gl, balances, matches, exceptions, proof = reconcile(args.bank, args.gl, args.balances)
+    out = build_report(bank, gl, matches, exceptions, proof, balances["period_end"], args.out)
 
-    n = {"Exact": 0, "Timing": 0, "Tolerance": 0}
+    n = defaultdict(int)
     for m in matches:
         n[m["pass"]] += 1
+    n_check = sum(1 for m in matches if m["method"] == "check no.")
+    n_bank = sum(1 for e in exceptions if e["Side"] == "Bank only")
     print(f"Bank rows: {len(bank)}   GL rows: {len(gl)}")
     print(f"Pass 1 exact:     {n['Exact']:>3}")
-    print(f"Pass 2 timing:    {n['Timing']:>3}")
+    print(f"Pass 2 timing:    {n['Timing']:>3}  (check no. {n_check}, date window {n['Timing'] - n_check})")
     print(f"Pass 3 tolerance: {n['Tolerance']:>3}")
     print(f"Total reconciled: {len(matches):>3}")
-    print(f"Exceptions:       {len(exceptions):>3}  "
-          f"(bank-only {len(bank_open)}, GL-only {len(gl_open)})")
+    print(f"Exceptions:       {len(exceptions):>3}  (bank-only {n_bank}, GL-only {len(exceptions) - n_bank})")
+    for side, c in proof["completeness"].items():
+        flag = "OK" if c["diff"] == 0 else "BREAK"
+        print(f"Completeness {side:<4}  {dollars(c['diff']):>12,.2f}  {flag}")
+    print(f"Unreconciled difference: {dollars(proof['difference']):,.2f}  "
+          f"{'TIES' if proof['difference'] == 0 else 'DOES NOT TIE'}")
     print(f"Report: {out}")
 
 

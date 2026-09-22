@@ -1,21 +1,24 @@
-### Domain specific terms : Banking 
+### Domain specific terms : Banking
 General ledger :  central master book or digital record where a business writes down every single financial transaction
 
-### Engine logic 
+### Engine logic
 A three-pass matching engine that reconciles a bank statement against a general-ledger
 cash extract and isolates every break into a multi-tab, close-ready Excel report —
 each exception ranked by dollar exposure and tagged with a probable cause and the
 action that clears it.
 
-On the bundled June 2026 dataset it **reconciles 115 transactions and isolates
-14 exceptions**, and the reconciliation proof on the Summary tab ties to **$0.00**.
+On the bundled June 2026 dataset it **reconciles 118 transactions and isolates
+18 exceptions**, and the reconciliation proof on the Summary tab, built from the
+bank's and the GL's *stated* closing balances, ties to **$0.00**.
 
 ```
 Pass 1 — EXACT       same signed amount, same date                          → 95 matches
-Pass 2 — TIMING      same amount, cleared within ±5 days                    → 12 matches
+Pass 2 — TIMING      same amount, cleared later:                            → 15 matches
+                       checks by check number (any lag)          13
+                       others within ±5 days, optimal assignment  2
 Pass 3 — TOLERANCE   amount within $0.99, ±7 days, fuzzy description match  →  8 matches
-                                                            Total reconciled: 115
-Everything left over → classified, ranked exception report                  →  14 breaks
+                                                            Total reconciled: 118
+Everything left over → classified, ranked exception report                  →  18 breaks
 ```
 
 ---
@@ -32,7 +35,8 @@ This engine automates the part that doesn't need judgment (finding the matches) 
 person's time goes only where judgment is needed (the breaks). Crucially, it builds
 **the exception report an accountant actually works from**: each break arrives
 pre-ranked by dollar exposure and pre-diagnosed — *outstanding check*, *deposit in
-transit*, *bank fee never booked*, *possible duplicate posting*, *unidentified
+transit*, *bank fee never booked*, *customer cheque returned NSF*, *possible
+duplicate posting*, *deposit the bank never received — investigate*, *unidentified
 debit — investigate* — with the journal entry or follow-up that clears it.
 
 Real-world fit: exactly the reconciliation work performed at month-end in an AP /
@@ -46,12 +50,14 @@ bank-to-gl-reconciliation/
 │   ├── generate_data.py     # builds the synthetic June 2026 dataset (deterministic, seed=42)
 │   └── reconcile.py         # the three-pass engine + Excel report writer
 ├── data/
-│   ├── bank_statement_jun2026.csv    # 122 rows — what the bank says
-│   └── gl_cash_extract_jun2026.csv   # 122 rows — what QuickBooks says
+│   ├── bank_statement_jun2026.csv    # 127 rows — what the bank says
+│   ├── gl_cash_extract_jun2026.csv   # 127 rows — what QuickBooks says
+│   └── balances_jun2026.csv          # stated opening/closing balances (statement + trial balance)
 ├── output/
 │   └── reconciliation_report_jun2026.xlsx   # 7-tab close-ready report
 ├── docs/
-│   └── WALKTHROUGH.md       # accounting logic, design decisions, interview Q&A
+│   ├── WALKTHROUGH.md       # accounting logic, design decisions, interview Q&A
+│   └── THE_NSF_BUG.md       # the bug the test data caught
 ├── requirements.txt
 └── README.md
 ```
@@ -68,60 +74,81 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 Expected console output:
 
 ```
-Bank rows: 122   GL rows: 122
+Bank rows: 127   GL rows: 127
 Pass 1 exact:      95
-Pass 2 timing:     12
+Pass 2 timing:     15  (check no. 13, date window 2)
 Pass 3 tolerance:   8
-Total reconciled: 115
-Exceptions:        14  (bank-only 7, GL-only 7)
+Total reconciled: 118
+Exceptions:        18  (bank-only 9, GL-only 9)
+Completeness Bank         0.00  OK
+Completeness GL           0.00  OK
+Unreconciled difference: 0.00  TIES
 ```
 
 Open `output/reconciliation_report_jun2026.xlsx` and start on the **Summary** tab.
 
 ## How the engine works
 
-**Pass 1 — Exact.** Transactions are keyed on signed amount in integer cents (no
-floating-point fuzz) and matched one-to-one when amount and date are identical.
-This clears the bulk of the file instantly.
+**Pass 1 — Exact.** Amounts are parsed from the CSV text with `Decimal` into
+integer cents (never through a float) and matched one-to-one when amount and
+date are identical. This clears the bulk of the file instantly.
 
-**Pass 2 — Timing.** A check written June 10 might clear June 13; an EFT settles a
-day or two after it's booked. Pass 2 matches identical amounts whose dates fall
-within ±5 days, taking the *nearest* date when several qualify. These aren't errors —
-they're the normal life of a transaction — so they're matched, not flagged.
+**Pass 2 — Timing.** A check written June 5 might clear June 16; an EFT settles a
+day or two after it's booked. Checks are matched on check number and amount,
+whatever the lag, because the check number is the strongest identifier the bank
+gives you. Everything else is matched on identical amounts within ±5 days. When
+several same-amount rows compete (recurring lease payments, say), the pairs are
+assigned optimally, maximising the number of matches and then minimising total
+lag, rather than greedily, because greedy nearest-date strands rows that had a
+valid partner. These aren't errors — they're the normal life of a transaction —
+so they're matched, not flagged.
 
 **Pass 3 — Tolerance + fuzzy description.** Rounding differences, FX cents,
-keyed-in-cents errors. Pass 3 pairs transactions whose amounts differ by ≤ $0.99 and
-whose dates are within ±7 days, but only when the descriptions actually resemble each
-other (normalized token-overlap / sequence similarity ≥ 0.35 — so "EFT WESCO DIST
-CANADA" pairs with "WESCO Distribution — invoice payment", but not with an unrelated
-vendor that happens to be 40¢ away). The residual cents are carried to the Summary
-proof as a pending write-off JE, so nothing silently disappears.
+keyed-in-cents errors. Pass 3 pairs transactions whose amounts differ by ≤ $0.99,
+have the same direction (money in or money out), and whose dates are within ±7
+days, but only when the descriptions actually resemble each other (normalized
+token-overlap / sequence similarity ≥ 0.35 — so "EFT WESCO DIST CANADA" pairs
+with "WESCO Distribution — invoice payment", but not with an unrelated vendor
+that happens to be 40¢ away). The best-scoring candidates are paired first. The
+residual cents are carried to the Summary proof as a pending write-off JE, so
+nothing silently disappears.
 
 **Exception classification.** Whatever survives all three passes is a real break.
 Instead of dumping them into one tab, the engine diagnoses each:
 
-| Side | Pattern | Probable cause | Suggested action |
+| Side | Pattern | Category | Suggested action |
 |---|---|---|---|
-| Bank only | fee / service charge / NSF keywords | Bank charge not booked | Book JE: DR Bank Charges / CR Cash |
-| Bank only | interest keywords | Interest not booked | Book JE: DR Cash / CR Interest Income |
-| Bank only | unknown credit | Unidentified deposit | Trace with bank / AR before booking |
-| Bank only | unknown debit | Possible unauthorized PAD | Investigate with bank |
-| GL only | check no., near month end | Outstanding check | Carry as reconciling item |
-| GL only | deposit on last GL day | Deposit in transit | Verify on July statement |
-| GL only | identical to an already-matched entry | **Possible duplicate posting** | Reverse the duplicate JE |
+| Bank only | fee / service charge keywords | `BANK_CHARGE` | Book JE: DR Bank Charges / CR Cash |
+| Bank only | interest keywords, credit | `INTEREST_INC` | Book JE: DR Cash / CR Interest Income |
+| Bank only | interest keywords, debit | `INTEREST_EXP` | Book JE: DR Interest Expense / CR Cash |
+| Bank only | NSF / returned item (not a fee) | `NSF_RETURN` | Book JE: DR Accounts Receivable / CR Cash, contact customer |
+| Bank only | unknown credit | `UNID_CREDIT` | Trace with bank / AR before booking |
+| Bank only | unknown debit | `UNID_DEBIT` | Investigate with bank |
+| GL only | check number | `OS_CHECK` | Carry as reconciling item |
+| GL only | payment, near month end | `PMT_IN_TRANSIT` | Confirm on next statement |
+| GL only | payment, mid-period | `PMT_NOT_DEBITED` | Investigate — was it sent? |
+| GL only | deposit, near month end | `DIT` | Verify on next statement |
+| GL only | deposit, mid-period | `DEP_NOT_CREDITED` | Investigate — was it deposited? |
+| GL only | same document and amount as another entry | `DUPLICATE` | Reverse the duplicate JE |
+
+The category code, not the display text, drives the proof and the report, so
+rewording a message can never move a dollar to the wrong side of the rec.
 
 Exceptions are ranked by absolute dollar amount — the $48K deposit in transit is
-row 1, the $45 wire fee is row 14 — because that's the order a reviewer works in.
+row 1, the $45 wire fee is row 18 — because that's the order a reviewer works in.
 
 ## Reading the report (7 tabs)
 
-1. **Summary** — match counts per pass, match rate, exception exposure, and a formal
-   reconciliation proof: bank balance → adjusted bank balance vs. GL balance →
-   adjusted GL balance, tying to an unreconciled difference of **0.00**.
-2. **Exceptions** — the working tab. Ranked, color-coded by cause category, with a
-   suggested action per row.
-3. **Matched — Exact / Timing / Tolerance** — full audit trail of every matched pair,
-   including days-delta, amount-delta, and (for pass 3) the fuzzy match score.
+1. **Summary** — match counts per pass, match rate, exception exposure, input
+   completeness controls (each file's rows must roll its stated opening balance
+   to its stated closing balance), and a formal reconciliation proof: stated bank
+   balance → adjusted bank balance vs. stated GL balance → adjusted GL balance,
+   tying to an unreconciled difference of **0.00**.
+2. **Exceptions** — the working tab. Ranked, color-coded by category, with a
+   probable cause, a suggested action and the source-file row for each break.
+3. **Matched — Exact / Timing / Tolerance** — full audit trail of every matched
+   pair, including the match method (amount + date, check no., date window,
+   fuzzy), days-delta, amount-delta, and the fuzzy match score for pass 3.
 4. **Bank Statement (source)** and **GL Extract (source)** — untouched inputs, so the
    workbook is self-contained for review or audit.
 
@@ -130,39 +157,51 @@ row 1, the $45 wire fee is row 14 — because that's the order a reviewer works 
 Point the CLI flags at your own files:
 
 ```bash
-.venv/bin/python src/reconcile.py --bank my_bank.csv --gl my_gl.csv --out my_rec.xlsx
+.venv/bin/python src/reconcile.py --bank my_bank.csv --gl my_gl.csv \
+    --balances my_balances.csv --out my_rec.xlsx
 ```
 
-Expected columns — `Date, Description, Reference, Amount` (bank) and
-`Date, Account, Memo, DocNo, Amount` (GL), with amounts signed from the cash
-account's perspective (deposits +, disbursements −). A QuickBooks
-*Transaction Detail by Account* export for the cash account maps directly.
+Expected columns — `Date, Description, Reference, Amount` (bank),
+`Date, Account, Memo, DocNo, Amount` (GL), and
+`Source, PeriodStart, PeriodEnd, OpeningBalance, ClosingBalance` (balances, one
+row each for `BANK` and `GL`, taken from the statement header and the trial
+balance). Amounts are signed from the cash account's perspective (deposits +,
+disbursements −). A QuickBooks *Transaction Detail by Account* export for the
+cash account maps directly.
 
 Tune the knobs at the top of `src/reconcile.py`:
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `TIMING_WINDOW_DAYS` | 5 | max clearing lag for pass 2 |
+| `TIMING_WINDOW_DAYS` | 5 | max clearing lag for pass 2 (non-check rows) |
 | `TOLERANCE_DOLLARS` | 0.99 | max amount difference for pass 3 |
 | `TOLERANCE_WINDOW_DAYS` | 7 | max date spread for pass 3 |
 | `FUZZY_THRESHOLD` | 0.35 | min description similarity for pass 3 |
-| `OPENING_BALANCE` | 184,352.19 | opening cash balance for the proof |
+| `MONTH_END_DAYS` | 5 | how close to period end an item must be to count as "in transit" |
+| `CHECK_REF` | `CHQ#1234` pattern | regex that extracts check numbers from references |
 
 ## Design decisions worth knowing
 
-- **Integer-cents matching.** Amounts are compared as `round(amount × 100)` integers,
-  never floats — a reconciliation engine that trusts `0.1 + 0.2 == 0.3` will
-  eventually lie to you.
-- **Greedy one-to-one matching, strictest pass first.** Every bank row can consume at
-  most one GL row, so a duplicate GL posting *cannot* hide behind the original — the
-  second copy is forced out as an exception, which is exactly how the duplicate-payment
-  test on this dataset gets caught.
-- **Pass 3 requires description similarity, not just amount proximity.** Amount-only
-  tolerance matching is how reconciliation tools create false matches; the fuzzy gate
-  keeps "close in dollars" from being mistaken for "the same transaction."
-- **Nothing disappears.** Pass-3 cent residuals flow to the proof as a pending
-  write-off; unidentified items are shown as *pending identification*, not absorbed.
-  The proof must tie to 0.00 or the report tells you it doesn't.
+- **Integer-cents matching.** Amounts are parsed from text with `Decimal` into
+  integer cents; floats appear only when values are written to Excel. A
+  reconciliation engine that trusts `0.1 + 0.2 == 0.3` will eventually lie to you.
+- **One-to-one matching, strictest pass first, optimal where rows compete.**
+  Every bank row consumes at most one GL row, so a duplicate GL posting *cannot*
+  hide behind the original. When same-amount rows compete on dates, the
+  assignment is solved optimally instead of greedily.
+- **Duplicates are identified by document, not by look-alike.** Same amount and
+  same document number means duplicate; same vendor and amount with a different
+  document is a recurring payment. The dataset includes three identical lease
+  payments specifically to test this.
+- **Pass 3 requires description similarity, not just amount proximity.**
+  Amount-only tolerance matching is how reconciliation tools create false
+  matches; the fuzzy gate keeps "close in dollars" from being mistaken for "the
+  same transaction."
+- **The proof is built on stated balances, not on the rows.** A proof computed
+  from the rows themselves ties by construction and can never fail. This one
+  starts from the bank statement's closing balance and the GL trial balance, and
+  completeness controls check that each file's rows account for its balance.
+  Delete one row and the proof breaks by exactly that amount.
 
 See [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) for the full accounting logic and a
 set of interview-ready talking points, and

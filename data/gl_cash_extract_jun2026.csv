@@ -19,12 +19,14 @@ Date,Account,Memo,DocNo,Amount
 2026-06-05,1010 Cash — Operating,Bell aerial build — holdback release,REF40634,77425.86
 2026-06-05,1010 Cash — Operating,GFL Environmental — invoice payment,REF40334,-14685.67
 2026-06-05,1010 Cash — Operating,Shell Fleet Card — invoice payment,REF40539,-6506.94
+2026-06-05,1010 Cash — Operating,Telecon Design — survey invoice,CHQ#1083,-5612.38
 2026-06-08,1010 Cash — Operating,Bell Canada — invoice payment,REF40379,-14193.51
 2026-06-08,1010 Cash — Operating,Bell aerial build — holdback release,REF40527,109123.56
 2026-06-08,1010 Cash — Operating,Bell aerial build — holdback release,REF40561,104277.78
 2026-06-08,1010 Cash — Operating,Ditch Witch of Ontario — invoice payment,CHQ#1053,-19414.58
 2026-06-08,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF40206,-23647.98
 2026-06-08,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF40816,-13386.11
+2026-06-08,1010 Cash — Operating,Enterprise Fleet Mgmt — vehicle lease unit 1,REF40968,-1286.43
 2026-06-08,1010 Cash — Operating,GFL Environmental — invoice payment,CHQ#1058,-2088.26
 2026-06-08,1010 Cash — Operating,Intact Insurance — invoice payment,REF40652,-5184.02
 2026-06-08,1010 Cash — Operating,Petro-Canada SuperPass — invoice payment,REF40596,-6891.43
@@ -44,6 +46,7 @@ Date,Account,Memo,DocNo,Amount
 2026-06-09,1010 Cash — Operating,Staples Business — invoice payment,CHQ#1076,-9101.04
 2026-06-09,1010 Cash — Operating,Telecon Design — invoice payment,CHQ#1062,-15288.66
 2026-06-09,1010 Cash — Operating,Telecon Design — invoice payment,CHQ#1072,-14804.25
+2026-06-11,1010 Cash — Operating,Enterprise Fleet Mgmt — vehicle lease unit 2,REF40985,-1286.43
 2026-06-11,1010 Cash — Operating,Intact Insurance — invoice payment,REF40786,-22782.19
 2026-06-11,1010 Cash — Operating,Milton Hydro — invoice payment,CHQ#1068,-15073.56
 2026-06-11,1010 Cash — Operating,Region of Halton — invoice payment,CHQ#1046,-21055.08
@@ -52,6 +55,7 @@ Date,Account,Memo,DocNo,Amount
 2026-06-11,1010 Cash — Operating,WESCO Distribution — invoice payment,CHQ#1067,-11233.06
 2026-06-11,1010 Cash — Operating,WESCO Distribution — invoice payment,CHQ#1071,-11995.77
 2026-06-12,1010 Cash — Operating,Brandt Tractor Ltd — invoice payment,REF40638,-1176.36
+2026-06-12,1010 Cash — Operating,Cogeco underground build — change order,REF41002,9406.58
 2026-06-12,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF40376,-16179.58
 2026-06-12,1010 Cash — Operating,GFL Environmental — invoice payment,REF40929,-743.29
 2026-06-12,1010 Cash — Operating,Petro-Canada SuperPass — invoice payment,CHQ#1044,-10980.23
@@ -116,6 +120,7 @@ Date,Account,Memo,DocNo,Amount
 2026-06-26,1010 Cash — Operating,United Rentals — invoice payment,REF40341,-22311.13
 2026-06-26,1010 Cash — Operating,Vermeer Canada — invoice payment,REF40716,-8508.86
 2026-06-26,1010 Cash — Operating,WESCO Distribution — invoice payment,REF40852,-13902.44
+2026-06-29,1010 Cash — Operating,Enterprise Fleet Mgmt — vehicle lease unit 3,REF40990,-1286.43
 2026-06-29,1010 Cash — Operating,Region of Halton — road permit fees,CHQ#1081,-2340.55
 2026-06-29,1010 Cash — Operating,Vermeer Canada — drill head rebuild,CHQ#1080,-15890.23
 2026-06-30,1010 Cash — Operating,Brandt Tractor Ltd — service invoice,CHQ#1082,-4178.09
