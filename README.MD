@@ -207,3 +207,10 @@ See [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) for the full accounting logic and
 set of interview-ready talking points, and
 [docs/THE_NSF_BUG.md](docs/THE_NSF_BUG.md) for the story of the one bug this
 project's own test data caught before it could ever misclassify a real transaction.
+
+
+
+## Version 1 : Phase 1 
+python src/db.py --init
+python src/db.py --load 2026-06
+python -m pytest -q
