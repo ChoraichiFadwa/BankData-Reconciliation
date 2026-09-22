@@ -35,6 +35,7 @@ Deterministic: fixed RNG seed, so the engine's output is reproducible
 (118 reconciled, 18 exceptions, proof ties to 0.00) on every run.
 """
 
+import argparse
 import csv
 import random
 from datetime import date, timedelta
@@ -43,7 +44,10 @@ from pathlib import Path
 SEED = 42
 random.seed(SEED)
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_ap = argparse.ArgumentParser(description="Generate the synthetic June 2026 dataset")
+_ap.add_argument("--out-dir", default=str(Path(__file__).resolve().parent.parent / "data"),
+                 help="where to write the CSVs (default: data/). Tests use a temp folder.")
+DATA_DIR = Path(_ap.parse_args().out_dir)
 ACCT = "1010 Cash — Operating"
 PERIOD_START = date(2026, 6, 1)
 PERIOD_END = date(2026, 6, 30)
