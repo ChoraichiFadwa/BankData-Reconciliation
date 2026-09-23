@@ -104,7 +104,7 @@ def test_matching_is_one_to_one(result):
 
 def test_every_row_is_matched_or_an_exception(result):
     n_bank_exc = sum(1 for e in result["exceptions"] if e["Side"] == "Bank only")
-    n_gl_exc = len(result["exceptions"]) - n_bank_exc
+    n_gl_exc = sum(1 for e in result["exceptions"] if e["Side"] == "GL only")
     assert len(result["matches"]) + n_bank_exc == len(result["bank"])
     assert len(result["matches"]) + n_gl_exc == len(result["gl"])
 
@@ -130,6 +130,7 @@ GOLDEN_EXCEPTIONS = [
     ("Bank only",   -12500, "BANK_CHARGE"),
     ("Bank only",    -4800, "BANK_CHARGE"),
     ("Bank only",    -4500, "BANK_CHARGE"),
+    ("Residual",       -35, "RESIDUAL"),      # cents pass 3 could not pair away
 ]
 
 
@@ -141,7 +142,7 @@ def test_exception_list_exact(result):
 def test_ranks_are_by_dollar_exposure(result):
     exposures = [abs(e["cents"]) for e in result["exceptions"]]
     assert exposures == sorted(exposures, reverse=True)
-    assert [e["Rank"] for e in result["exceptions"]] == list(range(1, 19))
+    assert [e["Rank"] for e in result["exceptions"]] == list(range(1, 20))
 
 
 def test_proof_ties_to_zero(result):
@@ -153,8 +154,12 @@ def test_proof_ties_to_zero(result):
 
 
 def test_pass3_residual_is_carried_to_proof(result):
+    """The residual is a reconciling item in its own right: it stays on the rec
+    until the write-off JE is booked, which is how the NEXT period inherits it."""
     residual = dict(result["proof"]["gl_lines"])["add: pass-3 amount residuals (pending write-off JE)"]
     assert residual == -35                                       # −$0.35, not lost
+    items = [e for e in result["exceptions"] if e["Category"] == "RESIDUAL"]
+    assert len(items) == 1 and items[0]["cents"] == -35
 
 
 # ------------------------------------------------------------------ 2. named edge cases
@@ -309,4 +314,4 @@ def test_report_builds(result, tmp_path):
                              "Matched — Tolerance", "Bank Statement (source)", "GL Extract (source)"]
     summary_text = [c.value for row in wb["Summary"].iter_rows() for c in row if c.value]
     assert "Status: TIES" in summary_text
-    assert wb["Exceptions"].max_row == 4 + 18      # header row 4 + 18 exceptions
+    assert wb["Exceptions"].max_row == 4 + 19      # header row 4 + 19 exceptions

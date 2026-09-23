@@ -1,4 +1,19 @@
-venv/
-__pycache__/
-.DS_Store
+# the ledger is rebuildable from the CSVs; a binary in git history is a nuisance
 ledger.db
+ledger.db-journal
+ledger.db-wal
+
+# generated reports
+output/*.xlsx
+
+# scratch
+*.txt
+!requirements.txt
+validate_phase5.py
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/

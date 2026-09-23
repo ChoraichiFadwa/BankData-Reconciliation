@@ -99,8 +99,10 @@ def similarity(a: str, b: str) -> float:
 
 # ------------------------------------------------------------------ loading
 def load(bank_path: str, gl_path: str):
-    bank = pd.read_csv(bank_path, dtype={"Amount": str, "Reference": str}, parse_dates=["Date"], encoding="utf-8-sig")
-    gl = pd.read_csv(gl_path, dtype={"Amount": str, "DocNo": str}, parse_dates=["Date"], encoding="utf-8-sig")
+    bank = pd.read_csv(bank_path, dtype={"Amount": str, "Reference": str},
+                       parse_dates=["Date"], encoding="utf-8-sig")
+    gl = pd.read_csv(gl_path, dtype={"Amount": str, "DocNo": str},
+                     parse_dates=["Date"], encoding="utf-8-sig")
     for df, ref_col in ((bank, "Reference"), (gl, "DocNo")):
         df["cents"] = df["Amount"].map(to_cents)
         df["Amount"] = df["cents"].map(dollars)            # display copy
@@ -283,6 +285,10 @@ CATEGORIES = {
                          "Investigate — confirm funds were actually deposited"),
     "DUPLICATE": ("Possible duplicate posting (same document and amount as another entry)",
                   "Review source document — reverse the duplicate JE"),
+    # not a row in either file: the cents left over by pass 3, which stay a
+    # reconciling item until somebody books the write-off
+    "RESIDUAL": ("Pass-3 amount residuals — pending write-off JE",
+                 "Book JE: write off the rounding difference to 6900 Misc Expense"),
 }
 
 INTEREST_PATTERN = re.compile(r"\bINTEREST\b", re.I)
@@ -299,6 +305,20 @@ def classify_bank_only(b) -> str:
     if NSF_PATTERN.search(desc) and b["cents"] < 0:
         return "NSF_RETURN"
     return "UNID_CREDIT" if b["cents"] > 0 else "UNID_DEBIT"
+
+
+def residual_item(residual_cents, period_end):
+    """The cents pass 3 could not pair away, as an exception row of its own.
+
+    Carrying it as an item rather than a footnote is what keeps the NEXT
+    period honest: until the write-off JE is booked, the difference is still
+    there, and the proof should say so."""
+    cause, action = CATEGORIES["RESIDUAL"]
+    return {"Side": "Residual", "Date": period_end,
+            "Description": "Pass-3 amount residuals across matched pairs",
+            "Doc/Ref": "", "cents": int(residual_cents), "Amount": dollars(int(residual_cents)),
+            "Category": "RESIDUAL", "Probable cause": cause, "Suggested action": action,
+            "Source row": 0}
 
 
 def classify_exceptions(bank, gl, bank_open, gl_open, matches, period_end):
@@ -349,6 +369,36 @@ def classify_exceptions(bank, gl, bank_open, gl_open, matches, period_end):
     return rows
 
 
+def merge_carried(exceptions, still_open, period_end):
+    """Fold items carried from earlier periods into this period's exception list.
+
+    A bank rec shows EVERY outstanding item, not only the ones raised this
+    month: a check written in June is still a reconciling item in July. They
+    are ranked together by exposure and re-numbered."""
+    rows = list(exceptions)
+    for item in still_open:
+        cause, action = CATEGORIES[item["category"]]
+        date_ = pd.Timestamp(item["origin_date"]) if item["origin_date"] else period_end
+        side = {"BANK": "Bank only", "GL": "GL only"}.get(item["side"], "Residual")
+        rows.append({
+            "Side": side,
+            "Date": date_,
+            "Description": item["description"] or CATEGORIES[item["category"]][0],
+            "Doc/Ref": item["doc_ref"] or "",
+            "cents": int(item["amount_cents"]), "Amount": dollars(int(item["amount_cents"])),
+            "Category": item["category"], "Probable cause": cause + " (carried forward)",
+            "Suggested action": action, "Source row": int(item["source_row"] or 0),
+            "Origin period": item["origin_period_id"], "item_id": item["item_id"],
+        })
+    for r in rows:
+        r.setdefault("Origin period", str(period_end)[:7])
+        r["Age (days)"] = int((period_end - r["Date"]).days)
+    rows.sort(key=lambda r: (-abs(r["cents"]), r["Date"], r["Side"], r["Source row"]))
+    for rank, r in enumerate(rows, 1):
+        r["Rank"] = rank
+    return rows
+
+
 # ------------------------------------------------------------------ proof
 # Where each category sits on the rec. Every category must appear exactly once;
 # build_proof refuses to run otherwise, so a new category can't silently vanish.
@@ -360,6 +410,7 @@ BANK_SIDE = [
     ("less: payments not debited by bank (investigate)", ["PMT_NOT_DEBITED"]),
 ]
 GL_SIDE = [
+    ("add: pass-3 amount residuals (pending write-off JE)", ["RESIDUAL"]),
     ("add: bank charges not booked", ["BANK_CHARGE"]),
     ("add: interest not booked (net)", ["INTEREST_INC", "INTEREST_EXP"]),
     ("add: NSF returned deposits not booked", ["NSF_RETURN"]),
@@ -389,11 +440,9 @@ def build_proof(bank, gl, matches, exceptions, balances) -> dict:
                               "stated_close": bal["close"],
                               "diff": bal["close"] - (bal["open"] + movement)}
 
-    residual = sum(m["cents_delta"] for m in matches)   # nonzero only for pass 3
     bank_lines = [(label, line_total(cats)) for label, cats in BANK_SIDE]
     gl_lines = [(label, line_total(cats)) for label, cats in GL_SIDE]
     gl_lines += [(label, -line_total(cats)) for label, cats in REVERSED_ON_GL]
-    gl_lines.append(("add: pass-3 amount residuals (pending write-off JE)", residual))
 
     adj_bank = B["close"] + sum(v for _, v in bank_lines)
     adj_gl = G["close"] + sum(v for _, v in gl_lines)
@@ -415,6 +464,10 @@ COUNT = "0"
 PCT = "0.0%"
 
 _JE, _INVESTIGATE = "E2EFDA", "FFC7CE"
+FLAG_FILLS = {"ESCALATE": PatternFill("solid", fgColor="FFC7CE"),
+              "STALE": PatternFill("solid", fgColor="F8CBAD"),
+              "FOLLOW_UP": PatternFill("solid", fgColor="FFF2CC")}
+
 CATEGORY_FILLS = {code: PatternFill("solid", fgColor=color) for code, color in {
     "DUPLICATE": "F8CBAD",
     "UNID_CREDIT": _INVESTIGATE, "UNID_DEBIT": _INVESTIGATE,
@@ -469,7 +522,7 @@ def write_label_value_table(ws, start_row, header, rows, bold_prefixes=()):
     return r
 
 
-def build_report(bank, gl, matches, exceptions, proof, period_end, out_path):
+def build_report(bank, gl, matches, exceptions, proof, period_end, out_path, ledger=None):
     wb = Workbook()
     period_label = period_end.strftime("%B %Y")
 
@@ -580,6 +633,61 @@ def build_report(bank, gl, matches, exceptions, proof, period_end, out_path):
                 f"Pass 3: amount within ${TOLERANCE_DOLLARS}, ±{TOLERANCE_WINDOW_DAYS} days, "
                 f"description similarity ≥ {FUZZY_THRESHOLD}. Amount Δ = residual to write off or adjust.")
 
+    # ---------------- Open Items (aged) — ledger mode only
+    if ledger:
+        ws = wb.create_sheet("Open Items (aged)")
+        ws.sheet_properties.tabColor = "BF8F00"
+        ws["A1"] = f"Open reconciling items at {period_label} close"
+        ws["A1"].font = TITLE_FONT
+        ws["A2"] = ("Every item still open, whichever period raised it, aged from its own "
+                    "transaction date. Flagged items need action, not just carrying.")
+        ws["A2"].font = SUB_FONT
+
+        summary = [(b["bucket"] + " days", b["count"], dollars(b["cents"]), b["flagged"])
+                   for b in ledger["aging_summary"]]
+        r = write_table(ws, 4, ["Age bucket", "Items", "Exposure", "Flagged"], summary,
+                        money_cols={3}, freeze=False)
+
+        headers = ["Origin period", "Date", "Description", "Doc/Ref", "Amount", "Category",
+                   "Age (days)", "Bucket", "Flag", "Escalated"]
+        rows = [[a["origin_period_id"], pd.Timestamp(a["origin_date"]), a["description"],
+                 a["doc_ref"], dollars(a["amount_cents"]), a["category"], a["age_days"],
+                 a["bucket"], a["flag"], "yes" if a["escalated"] else ""]
+                for a in ledger["aging"]]
+        last = write_table(ws, r + 2, headers, rows, money_cols={5}, date_cols={2})
+        for i, a in enumerate(ledger["aging"], r + 3):
+            fill = FLAG_FILLS.get(a["flag"])
+            if fill:
+                for c in range(1, len(headers) + 1):
+                    ws.cell(row=i, column=c).fill = fill
+        autosize(ws, [14, 12, 44, 14, 14, 18, 11, 10, 11, 10])
+
+        # ---------------- Rollforward
+        ws = wb.create_sheet("Rollforward")
+        ws.sheet_properties.tabColor = "2F5597"
+        ws["A1"] = "Reconciling items — rollforward"
+        ws["A1"].font = TITLE_FONT
+        ws["A2"] = ("open at start + raised − cleared − written off = open at end. "
+                    "One period's closing items are the next one's opening items.")
+        ws["A2"].font = SUB_FONT
+
+        headers = ["Period", "Open at start", "Raised", "Cleared", "Written off",
+                   "Open at end", "Exposure at end", "Check"]
+        rows = [[r_["period_id"], r_["opening_count"], r_["raised_count"], r_["cleared_count"],
+                 r_["written_off_count"], r_["closing_count"], dollars(r_["closing_cents"]),
+                 r_["status"]] for r_ in ledger["rollforward"]]
+        last = write_table(ws, 4, headers, rows, money_cols={7})
+        for i, r_ in enumerate(ledger["rollforward"], 5):
+            ws.cell(row=i, column=8).font = Font(
+                bold=True, color="375623" if r_["status"] == "BALANCED" else "C00000")
+        for j, line in enumerate(ledger["breaks"]):
+            ws.cell(row=last + 2 + j, column=1, value=f"BREAK: {line}").font = Font(color="C00000")
+        if not ledger["breaks"]:
+            ws.cell(row=last + 2, column=1,
+                    value="No breaks: every period balances and rolls into the next.").font = \
+                Font(bold=True, color="375623")
+        autosize(ws, [12, 14, 9, 9, 12, 13, 18, 12])
+
     # ---------------- Source tabs
     def source_tab(name, df, cols, money_col):
         ws = wb.create_sheet(name)
@@ -599,44 +707,165 @@ def build_report(bank, gl, matches, exceptions, proof, period_end, out_path):
 
 
 # ------------------------------------------------------------------ main
-def reconcile(bank_path, gl_path, balances_path):
-    """Everything except the report — the entry point tests will call."""
-    bank, gl = load(bank_path, gl_path)
-    balances = load_balances(balances_path)
-    matches, bank_open, gl_open = run_matching(bank, gl)
-    exceptions = classify_exceptions(bank, gl, bank_open, gl_open, matches, balances["period_end"])
+def reconcile(bank_path=None, gl_path=None, balances_path=None, conn=None,
+              period_id=None, carried=None):
+    """Everything except the report — the entry point tests will call.
+
+    Two sources, same result: three CSVs, or a period already in the ledger.
+    A parity test pins that both produce identical frames.
+
+    `carried` is the output of carryforward.resolve(): rows it consumed are
+    withheld from matching (they belong to an earlier period's item), and
+    items it could not clear are carried into the exceptions and the proof."""
+    if conn is not None and period_id is not None:
+        import db
+        bank, gl, balances = db.period_frames(conn, period_id)
+    else:
+        bank, gl = load(bank_path, gl_path)
+        balances = load_balances(balances_path)
+    # Rows consumed by pass 0 belong to an earlier period's item, so they are
+    # withheld from matching — but they are still rows of THIS file, so the
+    # completeness controls below are computed on the full frames.
+    bank_m, gl_m = bank, gl
+    if carried:
+        bank_m = bank[~bank["bank_txn_id"].isin(carried["consumed_bank"])].copy()
+        gl_m = gl[~gl["gl_entry_id"].isin(carried["consumed_gl"])].copy()
+
+    matches, bank_open, gl_open = run_matching(bank_m, gl_m)
+    exceptions = classify_exceptions(bank_m, gl_m, bank_open, gl_open, matches,
+                                     balances["period_end"])
+    residual = sum(m["cents_delta"] for m in matches)
+    if residual:
+        exceptions.append(residual_item(residual, balances["period_end"]))
+    if carried:
+        exceptions = merge_carried(exceptions, carried["still_open"], balances["period_end"])
+    else:
+        exceptions.sort(key=lambda r: (-abs(r["cents"]), r["Date"], r["Side"], r["Source row"]))
+        for rank, r in enumerate(exceptions, 1):
+            r["Rank"] = rank
     proof = build_proof(bank, gl, matches, exceptions, balances)
     return bank, gl, balances, matches, exceptions, proof
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Three-pass bank-to-GL reconciliation")
-    root = Path(__file__).resolve().parent.parent
-    ap.add_argument("--bank", default=str(root / "data/bank_statement_jun2026.csv"))
-    ap.add_argument("--gl", default=str(root / "data/gl_cash_extract_jun2026.csv"))
-    ap.add_argument("--balances", default=str(root / "data/balances_jun2026.csv"))
-    ap.add_argument("--out", default=str(root / "output/reconciliation_report_jun2026.xlsx"))
-    args = ap.parse_args()
+def report_path(period_end, out=None, root=None):
+    """Name the report after the period it reconciles, so months cannot
+    overwrite each other."""
+    if out:
+        return Path(out)
+    root = root or Path(__file__).resolve().parent.parent
+    return root / "output" / f"reconciliation_report_{period_end.strftime('%b%Y').lower()}.xlsx"
 
-    bank, gl, balances, matches, exceptions, proof = reconcile(args.bank, args.gl, args.balances)
-    out = build_report(bank, gl, matches, exceptions, proof, balances["period_end"], args.out)
 
+def print_summary(bank, gl, matches, exceptions, proof, n_carried=None):
     n = defaultdict(int)
     for m in matches:
         n[m["pass"]] += 1
     n_check = sum(1 for m in matches if m["method"] == "check no.")
     n_bank = sum(1 for e in exceptions if e["Side"] == "Bank only")
+    n_gl = sum(1 for e in exceptions if e["Side"] == "GL only")
+
     print(f"Bank rows: {len(bank)}   GL rows: {len(gl)}")
+    if n_carried is not None:
+        print(f"Pass 0 carryfwd:  {n_carried:>3}")
     print(f"Pass 1 exact:     {n['Exact']:>3}")
-    print(f"Pass 2 timing:    {n['Timing']:>3}  (check no. {n_check}, date window {n['Timing'] - n_check})")
+    print(f"Pass 2 timing:    {n['Timing']:>3}  "
+          f"(check no. {n_check}, date window {n['Timing'] - n_check})")
     print(f"Pass 3 tolerance: {n['Tolerance']:>3}")
     print(f"Total reconciled: {len(matches):>3}")
-    print(f"Exceptions:       {len(exceptions):>3}  (bank-only {n_bank}, GL-only {len(exceptions) - n_bank})")
+    print(f"Open items:       {len(exceptions):>3}  (bank-only {n_bank}, GL-only {n_gl})")
     for side, c in proof["completeness"].items():
-        flag = "OK" if c["diff"] == 0 else "BREAK"
-        print(f"Completeness {side:<4}  {dollars(c['diff']):>12,.2f}  {flag}")
+        print(f"Completeness {side:<4}  {dollars(c['diff']):>12,.2f}  "
+              f"{'OK' if c['diff'] == 0 else 'BREAK'}")
     print(f"Unreconciled difference: {dollars(proof['difference']):,.2f}  "
           f"{'TIES' if proof['difference'] == 0 else 'DOES NOT TIE'}")
+
+
+def run_from_ledger(args, root):
+    """Ledger mode: load the period if needed, clear what earlier periods left
+    open, reconcile the rest, and save the run back."""
+    import carryforward
+    import controls
+    import db
+    import store
+
+    db.init_db(args.db)                                  # no-op if it already exists
+    conn = db.connect(args.db)
+    try:
+        loaded = db.load_period(conn, args.period, args.data_dir, replace=args.replace)
+        print(f"Period {args.period}: {loaded['action']} "
+              f"(bank {loaded['bank']} rows, GL {loaded['gl']} rows)")
+
+        carried = carryforward.resolve(conn, args.period)
+        if carried["resolutions"] or carried["still_open"]:
+            print(f"Pass 0 carry-forward: cleared {len(carried['resolutions'])} prior items, "
+                  f"{len(carried['still_open'])} still open")
+
+        bank, gl, balances, matches, exceptions, proof = reconcile(
+            conn=conn, period_id=args.period, carried=carried)
+        print_summary(bank, gl, matches, exceptions, proof, len(carried["resolutions"]))
+
+        run_id = store.save_run(conn, args.period, bank, gl, matches, exceptions, proof,
+                                carried=carried)
+        n_new = conn.execute("SELECT COUNT(*) FROM reconciling_item WHERE origin_run_id = ?",
+                             (run_id,)).fetchone()[0]
+        print(f"Saved run {run_id} to the ledger: {len(matches)} matches, "
+              f"{n_new} items raised, {len(carried['resolutions'])} cleared")
+
+        # controls run after the items are stored: they read the ledger, not the run
+        escalated = controls.apply_escalations(conn, args.period)
+        ledger = {"aging": controls.aging(conn, args.period),
+                  "aging_summary": controls.aging_summary(conn, args.period),
+                  "rollforward": controls.rollforward(conn),
+                  "breaks": controls.rollforward_breaks(conn)}
+        controls.print_aging(conn, args.period)
+        if escalated:
+            print(f"  {len(escalated)} newly escalated")
+        print()
+        controls.print_rollforward(conn)
+
+        out = build_report(bank, gl, matches, exceptions, proof, balances["period_end"],
+                           report_path(balances["period_end"], args.out, root),
+                           ledger=ledger)
+    finally:
+        conn.close()
+    return out
+
+
+def run_from_files(args, root):
+    """File mode: three CSVs in, one report out. No database involved."""
+    missing = [f"--{n}" for n in ("bank", "gl", "balances") if not getattr(args, n)]
+    if missing:
+        raise SystemExit(f"file mode needs {', '.join(missing)} "
+                         f"(or use --period to reconcile from the ledger)")
+    bank, gl, balances, matches, exceptions, proof = reconcile(
+        args.bank, args.gl, args.balances)
+    out = build_report(bank, gl, matches, exceptions, proof, balances["period_end"],
+                       report_path(balances["period_end"], args.out, root))
+    print_summary(bank, gl, matches, exceptions, proof)
+    return out
+
+
+def main():
+    root = Path(__file__).resolve().parent.parent
+    ap = argparse.ArgumentParser(
+        description="Bank-to-GL reconciliation: carry-forward + three matching passes",
+        epilog="examples:  reconcile.py --period 2026-07   |   "
+               "reconcile.py --bank b.csv --gl g.csv --balances bal.csv")
+    ap.add_argument("--period", help="reconcile this period from the ledger (e.g. 2026-07) "
+                                     "and save the run back into it")
+    ap.add_argument("--bank", help="bank statement CSV (file mode)")
+    ap.add_argument("--gl", help="GL cash extract CSV (file mode)")
+    ap.add_argument("--balances", help="stated opening/closing balances CSV (file mode)")
+    ap.add_argument("--out", help="report path "
+                                  "(default: output/reconciliation_report_<period>.xlsx)")
+    ap.add_argument("--db", default=str(root / "ledger.db"))
+    ap.add_argument("--data-dir", default=str(root / "data"),
+                    help="where this period's CSVs live (ledger mode)")
+    ap.add_argument("--replace", action="store_true",
+                    help="reload this period's CSVs even if the stored rows differ")
+    args = ap.parse_args()
+
+    out = run_from_ledger(args, root) if args.period else run_from_files(args, root)
     print(f"Report: {out}")
 
 

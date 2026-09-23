@@ -1,0 +1,94 @@
+Date,Account,Memo,DocNo,Amount
+2026-07-01,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF41192,-2754.91
+2026-07-01,1010 Cash — Operating,June bank charges — NSF returned item fee,JE-2607-03,-48.00
+2026-07-01,1010 Cash — Operating,June bank charges — merchant processing,JE-2607-04,-389.44
+2026-07-01,1010 Cash — Operating,June bank charges — monthly account fee,JE-2607-01,-125.00
+2026-07-01,1010 Cash — Operating,June bank charges — wire service charge,JE-2607-02,-45.00
+2026-07-01,1010 Cash — Operating,June interest income per bank statement,JE-2607-05,214.87
+2026-07-01,1010 Cash — Operating,June interest on operating line of credit,JE-2607-06,-612.08
+2026-07-01,1010 Cash — Operating,NSF returned customer cheque 5521 — recharge to A/R,JE-2607-07,-3875.40
+2026-07-01,1010 Cash — Operating,Region of Halton — invoice payment,REF41047,-9240.68
+2026-07-01,1010 Cash — Operating,Reversal of duplicate posting — Region of Halton — invoice payment,JE-2607-08,10230.18
+2026-07-01,1010 Cash — Operating,Write-off of June reconciliation residual,JE-2607-09,-0.35
+2026-07-02,1010 Cash — Operating,Bell Canada — invoice payment,REF41406,-3195.21
+2026-07-02,1010 Cash — Operating,GFL Environmental — invoice payment,CHQ#1091,-14918.72
+2026-07-02,1010 Cash — Operating,WESCO Distribution — invoice payment,CHQ#1097,-5869.20
+2026-07-03,1010 Cash — Operating,Anixter Canada — invoice payment,CHQ#1089,-6483.87
+2026-07-03,1010 Cash — Operating,Home Depot Pro — invoice payment,REF41142,-6189.11
+2026-07-03,1010 Cash — Operating,Intact Insurance — invoice payment,REF41146,-5520.97
+2026-07-06,1010 Cash — Operating,ADP Payroll — invoice payment,REF41155,-3809.75
+2026-07-06,1010 Cash — Operating,ADP Payroll — invoice payment,REF41484,-23049.79
+2026-07-06,1010 Cash — Operating,Bell aerial build — holdback release,REF41309,101585.76
+2026-07-06,1010 Cash — Operating,Brandt Tractor Ltd — invoice payment,REF41545,-1880.98
+2026-07-06,1010 Cash — Operating,Cogeco underground build,REF41622,107446.55
+2026-07-06,1010 Cash — Operating,Telecon Design — invoice payment,CHQ#1098,-4354.73
+2026-07-06,1010 Cash — Operating,WESCO Distribution — invoice payment,CHQ#1090,-13328.46
+2026-07-06,1010 Cash — Operating,WSIB Ontario — invoice payment,REF41653,-16142.58
+2026-07-07,1010 Cash — Operating,Cogeco underground build,REF41197,109732.35
+2026-07-07,1010 Cash — Operating,Milton Hydro — invoice payment,CHQ#1085,-421.80
+2026-07-07,1010 Cash — Operating,Rogers Communications — progress billing,REF41149,110465.06
+2026-07-07,1010 Cash — Operating,WESCO Distribution — invoice payment,REF41679,-8431.55
+2026-07-08,1010 Cash — Operating,Home Depot Pro — invoice payment,REF41533,-2913.97
+2026-07-08,1010 Cash — Operating,Petro-Canada SuperPass — invoice payment,REF41291,-21180.45
+2026-07-08,1010 Cash — Operating,Petro-Canada SuperPass — invoice payment,CHQ#1087,-7483.76
+2026-07-09,1010 Cash — Operating,Anixter Canada — invoice payment,REF41320,-8631.93
+2026-07-09,1010 Cash — Operating,Telecon Design — invoice payment,REF41522,-16553.51
+2026-07-09,1010 Cash — Operating,Vermeer Canada — invoice payment,REF41127,-4508.79
+2026-07-09,1010 Cash — Operating,Vermeer Canada — invoice payment,REF41672,-2277.58
+2026-07-09,1010 Cash — Operating,WESCO Distribution — invoice payment,REF41440,-23178.15
+2026-07-10,1010 Cash — Operating,Region of Halton — invoice payment,REF41475,-23762.54
+2026-07-13,1010 Cash — Operating,Anixter Canada — invoice payment,CHQ#1088,-7236.59
+2026-07-13,1010 Cash — Operating,Brandt Tractor Ltd — invoice payment,REF41016,-3772.79
+2026-07-13,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF41352,-15995.53
+2026-07-13,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF41657,-15962.74
+2026-07-13,1010 Cash — Operating,Home Depot Pro — invoice payment,REF41276,-14292.75
+2026-07-13,1010 Cash — Operating,Intact Insurance — invoice payment,REF41369,-17948.18
+2026-07-13,1010 Cash — Operating,Rogers Communications — progress billing,REF41333,51481.20
+2026-07-13,1010 Cash — Operating,Telecon Design — invoice payment,REF41032,-10062.15
+2026-07-13,1010 Cash — Operating,Telus network build — milestone,REF41007,49454.36
+2026-07-13,1010 Cash — Operating,United Rentals — invoice payment,REF41444,-19762.79
+2026-07-14,1010 Cash — Operating,Ditch Witch of Ontario — invoice payment,REF41088,-5406.62
+2026-07-14,1010 Cash — Operating,Rogers Communications — invoice payment,REF41035,-5106.80
+2026-07-14,1010 Cash — Operating,Rogers Communications — progress billing,REF41118,32555.27
+2026-07-14,1010 Cash — Operating,Telecon Design — invoice payment,REF41585,-14425.23
+2026-07-14,1010 Cash — Operating,WSIB Ontario — invoice payment,REF41226,-481.37
+2026-07-15,1010 Cash — Operating,Bell aerial build — holdback release,REF41422,67245.73
+2026-07-15,1010 Cash — Operating,Cogeco underground build,REF41471,65546.30
+2026-07-15,1010 Cash — Operating,Region of Halton — invoice payment,REF41169,-22755.57
+2026-07-16,1010 Cash — Operating,Cogeco underground build,REF41496,87043.40
+2026-07-16,1010 Cash — Operating,Ditch Witch of Ontario — invoice payment,REF41323,-15565.41
+2026-07-16,1010 Cash — Operating,Ditch Witch of Ontario — invoice payment,REF41635,-23262.90
+2026-07-16,1010 Cash — Operating,Telus network build — milestone,REF41388,44474.62
+2026-07-17,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,CHQ#1095,-8110.84
+2026-07-17,1010 Cash — Operating,Region of Halton — invoice payment,REF41394,-23442.78
+2026-07-17,1010 Cash — Operating,Staples Business — invoice payment,REF41574,-22634.55
+2026-07-20,1010 Cash — Operating,ADP Payroll — invoice payment,REF41271,-19431.31
+2026-07-20,1010 Cash — Operating,Brandt Tractor Ltd — invoice payment,REF41449,-3733.89
+2026-07-20,1010 Cash — Operating,Enterprise Fleet Mgmt — invoice payment,REF41201,-20433.98
+2026-07-20,1010 Cash — Operating,Home Depot Pro — invoice payment,CHQ#1092,-1353.99
+2026-07-20,1010 Cash — Operating,Milton Hydro — invoice payment,REF41073,-17985.82
+2026-07-20,1010 Cash — Operating,Rogers Communications — invoice payment,CHQ#1094,-3982.62
+2026-07-20,1010 Cash — Operating,United Rentals — invoice payment,REF41720,-5233.60
+2026-07-20,1010 Cash — Operating,Vermeer Canada — invoice payment,REF41111,-22083.48
+2026-07-21,1010 Cash — Operating,Bell Canada — invoice payment,CHQ#1096,-17527.38
+2026-07-21,1010 Cash — Operating,Cogeco underground build,REF41243,111470.88
+2026-07-21,1010 Cash — Operating,Region of Halton — invoice payment,CHQ#1084,-16630.44
+2026-07-22,1010 Cash — Operating,ADP Payroll — invoice payment,CHQ#1093,-13713.40
+2026-07-22,1010 Cash — Operating,Bell Canada — invoice payment,REF41588,-2355.41
+2026-07-22,1010 Cash — Operating,Intact Insurance — invoice payment,REF41220,-12869.99
+2026-07-23,1010 Cash — Operating,Cogeco underground build,REF41557,36191.83
+2026-07-23,1010 Cash — Operating,Rogers Communications — invoice payment,REF41513,-5693.76
+2026-07-24,1010 Cash — Operating,Anixter Canada — invoice payment,REF41377,-7696.35
+2026-07-24,1010 Cash — Operating,Brandt Tractor Ltd — invoice payment,REF41254,-10553.30
+2026-07-24,1010 Cash — Operating,WESCO Distribution — invoice payment,REF41177,-14612.36
+2026-07-27,1010 Cash — Operating,Brandt Tractor Ltd — invoice payment,REF41409,-15374.06
+2026-07-27,1010 Cash — Operating,Cogeco underground build,REF41063,101810.32
+2026-07-27,1010 Cash — Operating,Home Depot Pro — invoice payment,CHQ#1086,-11817.92
+2026-07-27,1010 Cash — Operating,Petro-Canada SuperPass — invoice payment,REF41606,-13906.20
+2026-07-27,1010 Cash — Operating,Shell Fleet Card — invoice payment,REF41459,-3001.52
+2026-07-27,1010 Cash — Operating,Vermeer Canada — invoice payment,REF41138,-7965.47
+2026-07-27,1010 Cash — Operating,WSIB Ontario — invoice payment,REF41096,-16112.57
+2026-07-28,1010 Cash — Operating,Milton Hydro — invoice payment,REF41702,-1402.19
+2026-07-29,1010 Cash — Operating,Shell Fleet Card — invoice payment,REF41691,-3127.84
+2026-07-30,1010 Cash — Operating,Vermeer Canada — parts and labour,CHQ#1099,-6120.44
+2026-07-31,1010 Cash — Operating,Telus network build — milestone,REF41737,33410.92

@@ -29,6 +29,7 @@ from reconcile import check_number, to_cents
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA = ROOT / "sql" / "schema.sql"
+VIEWS = [ROOT / "sql" / "rollforward.sql"]          # control views, created at init
 DEFAULT_DB = ROOT / "ledger.db"
 DEFAULT_DATA = ROOT / "data"
 
@@ -45,6 +46,8 @@ def connect(db_path=DEFAULT_DB) -> sqlite3.Connection:
 def init_db(db_path=DEFAULT_DB) -> Path:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+        for view in VIEWS:
+            conn.executescript(view.read_text(encoding="utf-8"))
     return Path(db_path)
 
 
@@ -180,11 +183,13 @@ def period_frames(conn, period_id: str):
         df = pd.read_sql_query(sql, conn, params=(period_id,), parse_dates=["Date"])
         return df.rename(columns=rename)
 
-    bank = frame("""SELECT txn_date AS Date, description AS Description, reference AS Reference,
-                           amount_cents AS cents, check_no AS chk, source_row AS src_row
+    bank = frame("""SELECT bank_txn_id, txn_date AS Date, description AS Description,
+                           reference AS Reference, amount_cents AS cents,
+                           check_no AS chk, source_row AS src_row
                     FROM bank_txn WHERE period_id = ? ORDER BY source_row""", {})
-    gl = frame("""SELECT txn_date AS Date, account AS Account, memo AS Memo, doc_no AS DocNo,
-                         amount_cents AS cents, check_no AS chk, source_row AS src_row
+    gl = frame("""SELECT gl_entry_id, txn_date AS Date, account AS Account, memo AS Memo,
+                         doc_no AS DocNo, amount_cents AS cents,
+                         check_no AS chk, source_row AS src_row
                   FROM gl_entry WHERE period_id = ? ORDER BY source_row""", {})
     for df in (bank, gl):
         df["Amount"] = df["cents"] / 100
