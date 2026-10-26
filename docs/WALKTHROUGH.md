@@ -1,9 +1,5 @@
 # Walkthrough — the accounting logic, the engineering, and how to talk about it
 
-This document explains the project at the depth an interviewer (or a reviewer at
-a prospective employer) would probe: why each piece exists, what the accounting
-says, and what you'd say when asked about it.
-
 ---
 
 ## 1. The business problem
