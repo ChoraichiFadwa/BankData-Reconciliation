@@ -2,7 +2,7 @@
 ledger.db
 ledger.db-journal
 ledger.db-wal
-
+powerbi/data
 # generated reports
 output/*.xlsx
 
